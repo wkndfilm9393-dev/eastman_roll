@@ -224,6 +224,7 @@ kbd { font: 10px var(--mono); border: 1px solid var(--line); border-radius: 3px;
 @media (min-width: 700px) { .summary { padding: 32px 40px 60px; } }
 .sum-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .sum-head .title { margin: 6px 0; }
+.sum-head .close { flex: none; white-space: nowrap; }
 .sum-kept, .sum-out-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 .sum-out-list { margin-top: 12px; }
 .sum-frame { position: relative; aspect-ratio: 3/2; border: 0; padding: 0; overflow: hidden; }
@@ -263,6 +264,15 @@ kbd { font: 10px var(--mono); border: 1px solid var(--line); border-radius: 3px;
 .sum-note textarea::placeholder { font: 14px/1.5 var(--body); color: var(--muted); }
 .sum-text { margin: 8px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: 12px/1.5 var(--mono); white-space: pre-wrap; user-select: all; -webkit-user-select: all; }
 .sum-status { margin: 0; font-size: 13px; color: var(--accent); min-height: 1em; }
+.sum-actions .send:disabled { opacity: .55; }
+
+/* lab view: read-only roll + the customer's sends */
+.viewer.lab .actions[hidden] { display: none; }
+.viewer.lab .wordmark .eyebrow { margin-left: 8px; letter-spacing: 1.2px; }
+.viewer.lab .caption { cursor: default; }
+.lab-sends { display: grid; gap: 16px; max-width: 640px; }
+.lab-send-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.lab-send-head h3 { margin: 0; font-weight: 400; }
 
 /* contact sheet image preview */
 .sheet-export { position: fixed; inset: 0; z-index: 12; background: #000; display: flex; flex-direction: column; }

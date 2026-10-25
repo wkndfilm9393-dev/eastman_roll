@@ -1,3 +1,5 @@
+import { putSession } from './api';
+import { lastEdit, mergeSessions } from './session';
 import type { Manifest, Mark, Picks, PrintRequest, RollSession } from './types';
 
 export type Change =
@@ -5,11 +7,19 @@ export type Change =
   | { kind: 'mark'; index: number; fresh: boolean }
   | { kind: 'note'; index: number }
   | { kind: 'print'; index: number }
-  | { kind: 'labNote' };
+  | { kind: 'labNote' }
+  | { kind: 'submitted' };
 
 type Listener = (c: Change) => void;
 
 const KEY = (code: string) => `eastman-loupe:${code}`;
+const SYNC_DELAY = 1500, RETRY_DELAY = 10_000;
+
+export interface StoreOptions {
+  remote?: RollSession | null;   // the server's copy, merged with this device's
+  online?: boolean;              // a backend answered: sync edits to it
+  readOnly?: boolean;            // the lab view: show the customer's session, change nothing
+}
 
 function readLocal(code: string): RollSession | null {
   try {
@@ -21,12 +31,33 @@ function readLocal(code: string): RollSession | null {
 /** Single source of truth for one roll: marks, notes and the active frame. */
 export class Store {
   readonly session: RollSession;
+  readonly online: boolean;
+  readonly readOnly: boolean;
   active = 0;
   private listeners = new Set<Listener>();
   private saveTimer = 0;
+  private syncTimer = 0;
+  private inflight: Promise<unknown> | null = null;
+  private dirty = false;
 
-  constructor(readonly roll: Manifest) {
-    this.session = readLocal(roll.rollCode) ?? { rollCode: roll.rollCode, frames: {} };
+  constructor(readonly roll: Manifest, opts: StoreOptions = {}) {
+    const empty: RollSession = { rollCode: roll.rollCode, frames: {} };
+    this.readOnly = !!opts.readOnly;
+    this.online = !!opts.online && !this.readOnly;
+    if (this.readOnly) this.session = opts.remote ?? empty;
+    else {
+      const local = readLocal(roll.rollCode);
+      this.session = opts.remote ? mergeSessions(local ?? empty, opts.remote) : local ?? empty;
+      // edits made offline, or on this device before the backend existed, go up now
+      if (this.online && local && lastEdit(local) > lastEdit(opts.remote ?? empty)) this.dirty = true;
+    }
+    if (this.online) {
+      if (this.dirty) this.scheduleSync(0);
+      // a phone closing the tab mid-debounce must not lose the last mark
+      const flush = () => this.flush().catch(() => { /* retried on the next visit */ });
+      addEventListener('pagehide', flush);
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+    }
   }
 
   get count() { return this.roll.frames.length; }
@@ -51,12 +82,13 @@ export class Store {
   }
 
   setMark(i: number, mark: Mark) {
-    if (this.mark(i) === mark) return;
+    if (this.readOnly || this.mark(i) === mark) return;
     this.patch(i, { mark });
     this.emit({ kind: 'mark', index: i, fresh: mark !== 'none' });
   }
 
   setNote(i: number, note: string) {
+    if (this.readOnly) return;
     this.patch(i, { note: note.trim() || undefined });
     this.emit({ kind: 'note', index: i });
   }
@@ -66,6 +98,7 @@ export class Store {
   }
 
   setPrint(i: number, p: PrintRequest) {
+    if (this.readOnly) return;
     this.patch(i, { print: { copies: Math.max(0, Math.min(99, p.copies)), size: p.size } });
     this.emit({ kind: 'print', index: i });
   }
@@ -86,7 +119,9 @@ export class Store {
   }
 
   setLabNote(text: string) {
+    if (this.readOnly) return;
     this.session.labNote = text || undefined;
+    this.session.labNoteAt = Date.now();
     this.save();
     this.emit({ kind: 'labNote' });
   }
@@ -115,12 +150,45 @@ export class Store {
     this.save();
   }
 
-  // Local first so the viewer survives refresh and offline use; backend sync
-  // (PUT /api/roll/:code/session) hooks in here in Phase 3.
+  /** Sent to the lab, and nothing changed since. */
+  get sentUpToDate() {
+    const at = this.session.submittedAt;
+    return !!at && lastEdit(this.session) <= at;
+  }
+
+  markSubmitted(at: number) {
+    this.session.submittedAt = at;
+    this.writeLocal();
+    this.emit({ kind: 'submitted' });
+  }
+
+  /** Push pending edits now: before sending picks, and when the page is hidden. */
+  async flush(): Promise<void> {
+    if (!this.online) return;
+    clearTimeout(this.syncTimer);
+    while (this.inflight) await this.inflight.catch(() => { /* handled by its caller */ });
+    if (!this.dirty) return;
+    this.dirty = false;
+    this.inflight = putSession(this.roll.rollCode, this.session, document.visibilityState === 'hidden')
+      .finally(() => (this.inflight = null));
+    try { await this.inflight; }
+    catch (e) { this.dirty = true; this.scheduleSync(RETRY_DELAY); throw e; }
+  }
+
+  private scheduleSync(ms: number) {
+    clearTimeout(this.syncTimer);
+    this.syncTimer = window.setTimeout(() => this.flush().catch(() => { /* retried */ }), ms);
+  }
+
+  // Local first so the viewer survives refresh and offline use, then a
+  // debounced PUT /api/roll/:code/session when a backend is there.
   private save() {
     clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => {
-      try { localStorage.setItem(KEY(this.roll.rollCode), JSON.stringify(this.session)); } catch { /* private mode */ }
-    }, 120);
+    this.saveTimer = window.setTimeout(() => this.writeLocal(), 120);
+    if (this.online) { this.dirty = true; this.scheduleSync(SYNC_DELAY); }
+  }
+
+  private writeLocal() {
+    try { localStorage.setItem(KEY(this.roll.rollCode), JSON.stringify(this.session)); } catch { /* private mode */ }
   }
 }

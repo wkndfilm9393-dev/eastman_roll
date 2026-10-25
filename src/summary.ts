@@ -2,31 +2,15 @@
 // keeps, outs, print copies and sizes, notes — never the images. The marked
 // contact sheet image is the customer's own takeaway and is always available.
 
+import { submitPicks } from './api';
 import { picture } from './img';
+import { picksText } from './pickstext';
 import { openSheetImage } from './sheetimage';
 import type { Store } from './store';
-import { PRINT_SIZES, type Picks } from './types';
+import { PRINT_SIZES } from './types';
 
 const esc = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-const sizeLabel = (id: string) => PRINT_SIZES.find(s => s.id === id)?.label ?? id;
-
-/** Plain-text version of the picks, for sharing to the lab's chat until the backend lands. */
-export function picksText(store: Store, p: Picks = store.picks()): string {
-  const r = store.roll;
-  const lines = [`Eastman Film Lab · ${r.rollCode}`, `${r.title} · ${r.date}`, ''];
-  lines.push(`Keep: ${p.keep.join(', ') || '—'}`);
-  lines.push(`Out: ${p.reject.join(', ') || '—'}`);
-  if (p.prints.length) {
-    lines.push('', 'Prints:');
-    for (const x of p.prints) lines.push(`  #${x.frame} — ${x.copies} × ${sizeLabel(x.size)}`);
-  }
-  if (p.notes.length) {
-    lines.push('', 'Notes:');
-    for (const x of p.notes) lines.push(`  #${x.frame} — ${x.text}`);
-  }
-  if (p.labNote) lines.push('', 'Requests:', p.labNote);
-  return lines.join('\n');
-}
+const when = (t: number) => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 export function summary(store: Store, actions: { close(): void; jump(i: number): void }): HTMLElement {
   const el = document.createElement('div');
@@ -100,12 +84,43 @@ export function summary(store: Store, actions: { close(): void; jump(i: number):
   el.querySelector('.unmarked')?.addEventListener('click', () => actions.jump(store.nextUnmarked()));
   el.querySelector('.sheet-card')!.addEventListener('click', () => openSheetImage(store, el));
 
-  // Until the backend exists, send = hand the text to the share sheet (KakaoTalk
-  // etc.) or the clipboard. Phase 3 swaps this for POST /api/roll/:code/submit
-  // with store.picks() as the body.
+  // With a backend, send = POST /api/roll/:code/submit with store.picks(); the
+  // lab is notified with a /lab/:code link. Without one (static hosting, the
+  // demo) or if that fails, the picks go out as text via the share sheet
+  // (KakaoTalk etc.) or the clipboard.
   const status = el.querySelector<HTMLElement>('.sum-status')!;
-  el.querySelector<HTMLButtonElement>('.send')!.addEventListener('click', async () => {
-    const text = picksText(store);
+  const send = el.querySelector<HTMLButtonElement>('.send')!;
+  const renderSent = () => {
+    const at = store.session.submittedAt;
+    if (!store.online || !at) return;
+    const fresh = store.sentUpToDate;
+    send.textContent = fresh ? 'Sent to lab' : 'Send changes to lab';
+    send.disabled = fresh;
+    status.textContent = `Sent ${when(at)}.${fresh ? '' : ' You’ve changed things since.'}`;
+  };
+  renderSent();
+  const off = store.on(c => {
+    if (!el.isConnected) off();   // the picks screen was closed
+    else if (c.kind !== 'active') renderSent();
+  });
+
+  send.addEventListener('click', async () => {
+    if (store.online) {
+      send.disabled = true;
+      send.textContent = 'Sending…';
+      status.textContent = '';
+      try {
+        await store.flush().catch(() => { /* the picks below carry everything the lab needs */ });
+        const { submittedAt } = await submitPicks(r.rollCode, store.picks());
+        store.markSubmitted(submittedAt);
+        return;
+      } catch {
+        send.disabled = false;
+        send.textContent = 'Send picks to lab';
+        status.textContent = 'Couldn’t reach the lab. Share your picks instead:';
+      }
+    }
+    const text = picksText(r, store.picks());
     if (navigator.share) {
       try { await navigator.share({ title: `Picks · ${r.rollCode}`, text }); return; }
       catch (e) { if ((e as Error).name === 'AbortError') return; }

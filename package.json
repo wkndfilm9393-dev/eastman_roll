@@ -5,13 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && tsc --noEmit -p worker && vite build",
     "preview": "vite preview",
     "sample": "node scripts/make-sample-scans.mjs samples/K7QM2XW9PA && node scripts/ingest-roll.mjs samples/K7QM2XW9PA --code K7QM2XW9PA --stock \"Portra 400\" --date 2026-10-17 --roll 0412",
     "ingest": "node scripts/ingest-roll.mjs",
-    "demo": "tsc --noEmit && vite build --mode demo"
+    "demo": "tsc --noEmit && vite build --mode demo",
+    "deploy": "npm run build && npx wrangler deploy",
+    "upload": "node scripts/upload-roll.mjs"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "sharp": "^0.33.5",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",

@@ -1,3 +1,4 @@
+import { NotFound, fetchRoll } from './api';
 import { Gate } from './gate';
 import { Loupe } from './loupe';
 import { Store } from './store';
@@ -6,26 +7,20 @@ import { buildDemoRoll } from './demo';
 import { srcUrl } from './img';
 import { ContactSheet } from './sheet';
 import { openSheetImage } from './sheetimage';
+import { labPanel } from './labpanel';
 import { summary } from './summary';
-import type { Manifest, Mode } from './types';
+import type { Mode, Submission } from './types';
 
 const app = document.getElementById('app')!;
 const esc = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-
-async function loadRoll(code: string): Promise<Manifest> {
-  // Phase 3: GET /api/roll/:code → manifest + saved session
-  const res = await fetch(`/rolls/${encodeURIComponent(code)}/manifest.json`);
-  if (!res.ok) throw new Error(String(res.status));
-  return res.json();
-}
 
 // The single-file demo build (vite --mode demo) and /demo start from the photo picker.
 const DEMO = import.meta.env.MODE === 'demo' || location.pathname.startsWith('/demo');
 
 function route() {
   if (DEMO) return demoStart();
-  const m = location.pathname.match(/^\/r\/([A-Za-z0-9]{10,})\/?$/);
-  if (m) return openRoll(m[1].toUpperCase());
+  const m = location.pathname.match(/^\/(r|lab)\/([A-Za-z0-9]{10,})\/?$/);
+  if (m) return openRoll(m[2].toUpperCase(), m[1] === 'lab');
   app.innerHTML = `
     <main class="cover">
       <div class="cover-top"><span class="wordmark">Eastman Film Lab</span></div>
@@ -71,17 +66,29 @@ function demoStart() {
   });
 }
 
-async function openRoll(code: string) {
-  let roll: Manifest;
-  try { roll = await loadRoll(code); }
-  catch {
-    app.innerHTML = `<main class="cover"><div class="cover-top"><span class="wordmark">Eastman Film Lab</span></div>
-      <div class="cover-mid"><h1 class="title">Roll not found</h1><p class="eyebrow">Check the code on your sleeve, or ask the lab.</p></div></main>`;
+function notice(title: string, text: string) {
+  app.innerHTML = `<main class="cover"><div class="cover-top"><span class="wordmark">Eastman Film Lab</span></div>
+    <div class="cover-mid"><h1 class="title">${esc(title)}</h1><p class="eyebrow">${esc(text)}</p></div></main>`;
+}
+
+// /r/:code is the customer's roll; /lab/:code is the same viewer, read-only,
+// showing the customer's marks, notes and what they sent.
+async function openRoll(code: string, lab: boolean) {
+  let data: Awaited<ReturnType<typeof fetchRoll>>;
+  try { data = await fetchRoll(code); }
+  catch (e) {
+    if (e instanceof NotFound) notice('Roll not found', 'Check the code on your sleeve, or ask the lab.');
+    else notice('Couldn’t open the roll', 'Check your connection and try again.');
     return;
   }
+  const roll = data.manifest;
+  if (lab) {
+    if (!data.online) return notice('Lab view needs the server', 'Open this link on the deployed site.');
+    document.title = `Lab · ${roll.rollCode} — Eastman Film Lab`;
+    return viewer(new Store(roll, { remote: data.session, readOnly: true }), data.submissions);
+  }
   document.title = `${roll.title} — Eastman Film Lab`;
-  const store = new Store(roll);
-  cover(store);
+  cover(new Store(roll, { remote: data.session, online: data.online }));
 }
 
 function cover(store: Store) {
@@ -104,11 +111,12 @@ function cover(store: Store) {
 
 /* ───────────────────────────── viewer ───────────────────────────── */
 
-function viewer(store: Store) {
+function viewer(store: Store, submissions: Submission[] = []) {
+  const lab = store.readOnly;
   app.innerHTML = `
-    <div class="viewer">
+    <div class="viewer${lab ? ' lab' : ''}">
       <header class="bar top">
-        <span class="wordmark">Eastman Film Lab</span>
+        <span class="wordmark">Eastman Film Lab${lab ? ` <span class="eyebrow">Lab · ${esc(store.roll.rollCode)}</span>` : ''}</span>
         <span class="counter" aria-live="polite"></span>
       </header>
       <div class="stagewrap"></div>
@@ -120,7 +128,7 @@ function viewer(store: Store) {
         <span class="bar-actions">
           <button class="icon-btn save-sheet" aria-label="Save contact sheet image" title="Save contact sheet image"></button>
           <button class="mode icon-btn"></button>
-          <button class="pill send">Send picks</button>
+          <button class="pill send">${lab ? 'Order' : 'Send picks'}</button>
         </span>
       </footer>
       <dialog class="note-sheet">
@@ -138,13 +146,14 @@ function viewer(store: Store) {
   const dlg = $<HTMLDialogElement>('.note-sheet'), viewerEl = $('.viewer');
   const hint = $('.hint');
   let hintSeen = false;
-  try { hintSeen = !!localStorage.getItem('eastman-loupe:hint'); } catch { /* storage blocked */ }
+  try { hintSeen = lab || !!localStorage.getItem('eastman-loupe:hint'); } catch { /* storage blocked */ }
 
   // thumb-zone marking buttons, shared by both modes
   const btnOut = actionButton('reject', 'Out', 'out');
   const btnNote = actionButton('note', 'Note', 'note');
   const btnKeep = actionButton('keep', 'Keep', 'keep');
-  $('.actions').append(btnOut, btnNote, btnKeep);
+  if (!lab) $('.actions').append(btnOut, btnNote, btnKeep);
+  $('.actions').hidden = lab;
   btnOut.onclick = () => store.toggleMark(store.active, 'reject');
   btnKeep.onclick = () => store.toggleMark(store.active, 'keep');
   btnNote.onclick = () => actions.editNote(store.active);
@@ -168,6 +177,7 @@ function viewer(store: Store) {
       setMode('gate');
     },
     editNote(i: number) {
+      if (lab) return;   // notes are on screen already; nothing to edit
       store.setActive(i, 'note');
       dlg.querySelector('.note-label')!.textContent = `Note · Frame ${store.frame(i).number}`;
       const ta = dlg.querySelector('textarea')!;
@@ -206,7 +216,9 @@ function viewer(store: Store) {
     // empty slot invites a note in frame-by-frame, where there's room for it
     caption.hidden = mode !== 'gate';   // the sheet shows notes in its margins
     caption.classList.toggle('empty', !note);
-    caption.textContent = note || (matchMedia('(pointer: coarse)').matches ? 'Hold the frame to add a note' : 'Press N to add a note');
+    caption.disabled = lab;
+    caption.textContent = note || (lab ? '' : matchMedia('(pointer: coarse)').matches ? 'Hold the frame to add a note' : 'Press N to add a note');
+    if (lab && !note) caption.hidden = true;
   }
   function renderTally() {
     const t = store.tally();
@@ -215,7 +227,7 @@ function viewer(store: Store) {
   }
   store.on(c => {
     if (c.kind === 'mark') renderTally();
-    if (c.kind !== 'labNote') renderActive();
+    if (c.kind !== 'labNote' && c.kind !== 'submitted') renderActive();
   });
   setMode('gate');
   renderActive();
@@ -227,10 +239,11 @@ function viewer(store: Store) {
   saveBtn.onclick = () => openSheetImage(store, viewerEl);
   function openSummary() {
     if (sheet) return;
-    sheet = summary(store, {
+    const nav = {
       close: closeSummary,
-      jump(i) { closeSummary(); if (i >= 0) store.setActive(i, 'summary'); },
-    });
+      jump(i: number) { closeSummary(); if (i >= 0) store.setActive(i, 'summary'); },
+    };
+    sheet = lab ? labPanel(store, submissions, nav) : summary(store, nav);
     viewerEl.append(sheet);
   }
   function closeSummary() { sheet?.remove(); sheet = null; }
@@ -266,6 +279,7 @@ function viewer(store: Store) {
       return;
     }
     if (sheet) return;
+    if (lab && ['f', 'F', 'x', 'X', '0', 'Backspace', 'n', 'N'].includes(k)) return;   // read-only
     const step = (d: number) => (loupe ? store.setActive(i + d, 'key') : view?.step(d));
     switch (k) {
       case 'ArrowRight': step(1); break;

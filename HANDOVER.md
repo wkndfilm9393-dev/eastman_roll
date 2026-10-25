@@ -1,7 +1,7 @@
 # Eastman Film Lab — Roll Viewer · Build Handover
 
 **Owner:** Bryan Kim, Eastman Film Lab
-**Status as of 2026-10-25:** Phases 1 and 2 are done and were reviewed with Bryan screen by screen. Phases 3 and 4 have not started.
+**Status as of 2026-10-25:** Phases 1 and 2 are done and were reviewed with Bryan screen by screen. Phase 3 (backend, send, lab view) is built and tested locally, not yet deployed or reviewed with Bryan; see §6. Phase 4 has not started.
 **Live demo (private, Bryan's account):** https://claude.ai/artifact/QDrJnpMZgMYDAjYqRKyAas
 **Original brief:** [`docs/ORIGINAL-BRIEF.md`](docs/ORIGINAL-BRIEF.md). This document wins wherever the two disagree. Several parts of the brief were changed on purpose during review; see §3.
 
@@ -18,13 +18,15 @@ The audience is **mostly on phones**. Every layout decision starts from a 375px-
 ```bash
 npm install
 npm run sample        # makes 36 placeholder scans and ingests them into public/rolls/K7QM2XW9PA
-npm run dev           # open http://localhost:5173/r/K7QM2XW9PA
+npm run dev           # open http://localhost:5173/r/K7QM2XW9PA  (lab view: /lab/K7QM2XW9PA)
 ```
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Vite dev server. `/r/{code}` opens a roll; `/demo` opens the photo-picker demo |
-| `npm run build` | Type-check and production build into `dist/` |
+| `npm run dev` | Vite dev server with the real backend handler on `/api/*` (sessions in `.dev-data/kv.json`, rolls from `public/rolls`). `/r/{code}` opens a roll, `/lab/{code}` the lab view, `/demo` the photo-picker demo. Set `LAB_WEBHOOK_URL` to test notifications; otherwise they print to the terminal |
+| `npm run build` | Type-check app and Worker, production build into `dist/` (local sample rolls are stripped out) |
+| `npm run deploy` | Build, then `npx wrangler deploy` (see §6 for one-time setup) |
+| `npm run upload -- <CODE>` | Copies an ingested roll from `public/rolls/<CODE>` to R2 via wrangler |
 | `npm run demo` | One self-contained HTML file in `demo-dist/index.html`: code and the OCR-A font inlined, no sample rolls. It starts from a photo picker. Copy it over `eastman-loupe-demo.html` |
 | `npm run ingest -- <scanDir> --stock "Portra 400" --date 2026-10-17 --roll 0412` | Turns a folder of lab scans into a roll (see §5) |
 | `npm run sample` | Placeholder roll for development (synthetic images, not real scans) |
@@ -84,25 +86,35 @@ These came from Bryan directly, often after he rejected an earlier version. Trea
 
 ```
 src/
-  main.ts         routing (/r/:code, /demo), cover, viewer chrome, mode toggle, keys, note sheet
-  types.ts        Manifest, Frame, RollSession, Picks, PrintRequest, ViewActions
-  store.ts        single source of truth: marks, notes, prints, active frame; localStorage; picks()
+  main.ts         routing (/r/:code, /lab/:code, /demo), cover, viewer chrome, mode toggle, keys, note sheet
+  types.ts        Manifest, Frame, RollSession, Picks, PrintRequest, Submission, RollResponse, ViewActions
+  store.ts        single source of truth: marks, notes, prints, active frame; localStorage + debounced server sync; picks(); readOnly for the lab
+  api.ts          fetchRoll / putSession / submitPicks; falls back to static manifest when there is no backend
+  session.ts      mergeSessions(): per-frame newest-edit-wins (shared with the Worker)
+  pickstext.ts    plain-text picks (share fallback, lab notification, lab view; shared with the Worker)
+  labpanel.ts     lab view's Order panel: every send, newest first, with Copy
   film.ts         frame cell + edge-print ribbon (the only film-markup code)
   gate.ts         frame-by-frame view: clipped strip, swipe, vertical flick to mark, hold for note, scrubber
   sheet.ts        contact-sheet view with marks and per-frame notes
   sheetimage.ts   canvas renderer for the marked contact sheet (JPEG ~3200×4000) + save flow
   marks.ts        keep/out mark paths and inks (shared by SVG and canvas)
   loupe.ts        full-screen single frame (double-tap / Space), 1:1 zoom and pan
-  summary.ts      picks screen: print requests, lab note, send, contact-sheet card
+  summary.ts      picks screen: print requests, lab note, send (POST, else share text), contact-sheet card
   icons.ts        plain system icons and action buttons
   img.ts          <picture> builder (AVIF → WebP), srcUrl(), screen-image preloading
   demo.ts         builds a roll in the browser from picked photos (shrinks them on the device, uploads nothing)
   styles.css      tokens, chrome, film block, views, marks, sheets
   fonts/ocr-a.ttf OCR-A (Tsukurimashou build, free for commercial use)
+worker/
+  handler.ts      the backend: /api/roll/:code (GET, PUT session, POST submit), /rolls/* from R2, lab webhook
+  index.ts        Cloudflare entry: handler first, then static assets (dist/)
+  dev.ts          the same handler inside `npm run dev`, backed by local files
 scripts/
   ingest-roll.mjs       scans → thumb/screen AVIF+WebP, full JPEG, manifest.json
+  upload-roll.mjs       an ingested roll → R2 (manifest last, so a half-uploaded roll stays invisible)
   make-sample-scans.mjs synthetic placeholder roll
-public/_redirects       Cloudflare Pages SPA routing for /r/* and /lab/*
+wrangler.toml           Worker + R2 (ROLLS) + KV (SESSIONS) + assets with SPA fallback
+public/_redirects       Cloudflare Pages SPA routing for /r/* and /lab/* (only if hosting on Pages instead)
 ```
 
 **Interaction map (as built)**
@@ -118,30 +130,50 @@ public/_redirects       Cloudflare Pages SPA routing for /r/* and /lab/*
 | Next unmarked | button on the picks screen | U |
 | Contact sheet | toggle icon in the bottom bar | — |
 
-Bundle: about 14 KB of JS and 5 KB of CSS gzipped, against the brief's 60 KB budget.
+Bundle: about 16 KB of JS and 5.5 KB of CSS gzipped, against the brief's 60 KB budget. The Worker is about 9 KB.
 
 ## 5. Data and images
 
 - A roll is `public/rolls/{CODE}/manifest.json` plus `thumb/` (480px), `screen/` (2048px) and `full/` (original JPEG; never loaded by the viewer). Thumb and screen come as AVIF and WebP.
 - Roll codes: 10+ characters from `23456789ABCDEFGHJKMNPQRSTUVWXYZ` (no 0/O/1/I/L, because they're printed on sleeves). `ingest-roll.mjs` generates one if `--code` is omitted.
-- Session state is in `localStorage` under the key `eastman-loupe:{CODE}`. Wrap any new storage access in try/catch.
+- Session state is in `localStorage` under the key `eastman-loupe:{CODE}`, and on the server in KV under `session:{CODE}`. Sends are kept as sent under `submissions:{CODE}` (last 20). Wrap any new storage access in try/catch.
+- In production the manifest and images live in R2 at `rolls/{CODE}/…` and the Worker serves them on the viewer's own origin, so the contact-sheet canvas is never tainted and R2 needs no CORS rules.
 - The lab's own roll ID format elsewhere is `EL-YYYYMMDD-NNN` (twin-check sticker number). This viewer uses the unguessable code from the brief. Mapping between the two is a Phase 3 decision.
 
-## 6. What's next
+## 6. Phase 3: what's built, and what's next
 
-**Phase 3: backend, send, lab view** (from the brief §7–§8, adjusted by §3 above)
-- Endpoints: `GET /api/roll/:code`, `PUT /api/roll/:code/session` (debounced from `Store.save()`), `POST /api/roll/:code/submit` with `store.picks()` as the body.
-- Until then, Send shares the picks as text (share sheet, then clipboard, then a box to copy from). Replace that in `src/summary.ts`.
-- `/lab/:code`: the same viewer, read-only, with marks, notes and print requests visible.
-- Suggested stack: Cloudflare Pages + R2 + a Worker with D1 or KV. The lab already runs a Worker + R2 + Pages setup for print intake, deployed with `wrangler`.
-- **R2 must send CORS headers** for the image paths. Otherwise the contact-sheet export canvas is tainted and fails.
-- Open with Bryan: where lab notifications go (email, KakaoTalk via SOLAPI, or a sheet), the domain/URL pattern, and how `EL-…` IDs map to roll codes.
+**Built (2026-10-25), tested in dev with Playwright at 375×812, not yet deployed:**
+- **One Cloudflare Worker** (`worker/`, `wrangler.toml`) serves the viewer, the API and the roll images. This replaces the brief's Pages + separate Worker split: one deploy, one origin, no CORS. `public/_redirects` is kept in case Bryan prefers Pages.
+- `GET /api/roll/:code` → `{ manifest, session, submissions }`.
+- `PUT /api/roll/:code/session`: the viewer sends its whole session 1.5 s after the last edit, and again when the tab is hidden or closed (`keepalive`). The server merges per frame (newer `updatedAt` wins, future timestamps are clamped), so a phone and a laptop don't overwrite each other. Unknown frames, marks and sizes are dropped; notes are capped at 500 chars, the lab note at 2000, bodies at 64 KB. Failed syncs retry after 10 s; localStorage stays the first copy.
+- `POST /api/roll/:code/submit` with `store.picks()` as the body (frame numbers and requests only). The server validates it against the manifest, stores it as sent, sets `submittedAt`, and notifies the lab.
+- **Send** (`src/summary.ts`): POSTs, then shows "Sent {time}". If the customer changes anything afterwards the button becomes "Send changes to lab"; the lab gets each send separately. Picks are **not locked** after sending (the brief said "lock picks"); confirm with Bryan. If the server can't be reached, or there is no backend at all (static hosting, the demo), Send falls back to the old share-sheet / clipboard / copy-box flow.
+- **`/lab/:code`**: the same viewer, read-only. No Keep/Out/Note buttons, flicks and keys don't mark, notes show but can't be edited. "Order" opens every send, newest first, as text with a Copy button, and says so if the customer has changed things since their last send.
+- **Notification:** one JSON POST to `LAB_WEBHOOK_URL` with `text` (Slack style), `content` (Discord style), `labUrl` and the structured `picks`. Without the secret it is only logged.
 
-**Phase 4: narrate**: not started. The brief §5 still applies.
+**One-time deploy setup**
+1. `npx wrangler login`
+2. `npx wrangler r2 bucket create eastman-rolls`
+3. `npx wrangler kv namespace create SESSIONS`, and put the id in `wrangler.toml`
+4. Optional: `npx wrangler secret put LAB_WEBHOOK_URL`; set `PUBLIC_ORIGIN` under `[vars]` once the domain is chosen
+5. `npm run deploy`, then for each roll: `npm run ingest -- …` and `npm run upload -- <CODE>`
+
+**Open with Bryan (these block calling Phase 3 done; brief §9: "lab receives a notification with a working /lab/:code link")**
+- Where lab notifications go: email, KakaoTalk via SOLAPI, or a sheet. Each is a small adapter in `notify()` in `worker/handler.ts`; the webhook covers Slack/Discord/Make/Zapier today.
+- Domain / URL pattern, so `PUBLIC_ORIGIN` and the QR on the sleeve can be set.
+- How `EL-YYYYMMDD-NNN` maps to roll codes. Simplest: add `labId` to the manifest at ingest (`--lab-id`) and show it in the lab view and notification.
+- `/lab/:code` has **no auth**; anyone with the roll code can open it, same as `/r/:code`. It is read-only and shows nothing the customer can't already see, but if the lab wants it private, put it behind Cloudflare Access (no code change needed).
+- Whether sending should lock the picks.
+- Which KV namespace / Cloudflare account: the lab already has a Worker + R2 + Pages setup for print intake.
+
+**Not done from the brief's Phase 3:** "Download kept (ZIP)" and the PDF/print route were dropped in review (§3).
+
+**Phase 4: narrate**: not started. The brief §5 still applies. `RollSession.narrations` is reserved for it.
 
 **Known gaps**
-- Never tested on a real iPhone or Android; only Chrome's phone emulation. Do a Safari pass first.
+- Never tested on a real iPhone or Android; only Chrome's phone emulation. Do a Safari pass first. On iOS, the share-sheet fallback after a failed send may not open, because the tap's user activation has expired by then; it then falls through to the copy box, which works.
 - No real scans yet: the sample roll is synthetic. Ask Bryan for a real roll and run `ingest-roll.mjs` on it.
+- Edits made on another device while a page is open show up only after a reload; there is no live push.
 - Demo mode drops files the browser can't decode (e.g. HEIC on non-Safari browsers).
 - In the claude.ai artifact viewer, the Web Share API is blocked. There, Save image goes through the viewer's `downloads` capability and Send falls back to copyable text. A normal browser uses Web Share and downloads directly.
 - The brief §9 acceptance targets ("< 1MB initial", "60fps on a mid-range phone", "replay sync < 150ms") have not been measured on devices.
@@ -154,4 +186,4 @@ Bundle: about 14 KB of JS and 5 KB of CSS gzipped, against the brief's 60 KB bud
 | `docs/ORIGINAL-BRIEF.md` | Bryan's original build brief, for reference |
 | `README.md` | quick start and file map |
 | `eastman-loupe-demo.html` | built single-file demo: open it in a browser and pick photos |
-| `src/`, `scripts/`, config | the app |
+| `src/`, `worker/`, `scripts/`, config | the app and its backend |

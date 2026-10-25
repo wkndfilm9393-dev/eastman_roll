@@ -1,0 +1,24 @@
+# One Worker serves the viewer (dist/), the API and the roll images.
+# Deploy:  npm run build && npx wrangler deploy
+# Setup and open decisions: HANDOVER.md §6.
+name = "eastman-roll"
+main = "worker/index.ts"
+compatibility_date = "2026-10-01"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"   # /r/:code and /lab/:code load index.html
+run_worker_first = ["/api/*", "/rolls/*"]
+
+[[r2_buckets]]
+binding = "ROLLS"
+bucket_name = "eastman-rolls"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"   # npx wrangler kv namespace create SESSIONS
+
+# [vars]
+# PUBLIC_ORIGIN = "https://rolls.example.com"
+# LAB_WEBHOOK_URL is a secret:  npx wrangler secret put LAB_WEBHOOK_URL

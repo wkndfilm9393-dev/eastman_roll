@@ -116,7 +116,7 @@ export class Gate {
         vertical = Math.abs(dy) > Math.abs(dx) * 1.4;
         if (!vertical) { reset(); return; }       // a sideways swipe belongs to the scroller
       }
-      if (vertical) {
+      if (vertical && !this.store.readOnly) {
         const d = Math.max(-90, Math.min(90, dy));
         win.style.transform = `translateY(${d * 0.5}px)`;
         win.dataset.flick = dy < -FLICK ? 'keep' : dy > FLICK ? 'reject' : '';

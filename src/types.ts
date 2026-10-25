@@ -36,6 +36,7 @@ export interface RollSession {
   rollCode: string;
   frames: Record<string, FrameState>;
   labNote?: string;
+  labNoteAt?: number;      // when labNote last changed, for merging devices
   submittedAt?: number;
   narrations?: { id: string; audioUrl: string; logUrl: string; duration: number }[];
 }
@@ -50,6 +51,16 @@ export interface Picks {
   prints: { frame: string; copies: number; size: PrintSize }[];
   notes: { frame: string; text: string }[];
   labNote?: string;
+}
+
+/** One send to the lab, kept as sent so the lab works from a stable record. */
+export interface Submission { at: number; picks: Picks }
+
+/** GET /api/roll/:code */
+export interface RollResponse {
+  manifest: Manifest;
+  session: RollSession | null;
+  submissions: Submission[];
 }
 
 export interface ViewActions {

@@ -8,7 +8,16 @@ Vite + vanilla TypeScript. **Start with [`HANDOVER.md`](HANDOVER.md)**: current 
 ```
 npm install
 npm run sample        # 36 placeholder scans → public/rolls/K7QM2XW9PA (not committed)
-npm run dev           # http://localhost:5173/r/K7QM2XW9PA
+npm run dev           # http://localhost:5173/r/K7QM2XW9PA · lab view /lab/K7QM2XW9PA
+```
+
+The dev server runs the real backend (`worker/handler.ts`) on `/api/*`, with sessions in `.dev-data/`.
+
+## Deploy (Cloudflare Worker + R2 + KV)
+
+```
+npm run deploy                # build + npx wrangler deploy; one-time setup in HANDOVER.md §6
+npm run upload -- K7QM2XW9PA  # copy an ingested roll to R2
 ```
 
 ## Demo (pick your own photos)
@@ -39,8 +48,10 @@ Per frame: `thumb/` 480px AVIF+WebP, `screen/` 2048px AVIF+WebP, `full/` origina
 | `src/loupe.ts` | Full-screen frame, click for 1:1, drag to pan |
 | `src/marks.ts` | Hand-drawn sharpie marks: exam-style orange O (#F6853D) = keep, black X = out, both 70% opacity, one clean stroke each. 4 seeded variants; same paths used by the exported image |
 | `src/icons.ts` | System icons + Keep/Out/Note buttons (plain UI). Handwriting (Kalam, Korean = Nanum Pen Script) is only for what the customer writes: marks, note text |
-| `src/store.ts` | Marks/notes/active frame, saved to localStorage. Backend sync hooks in `save()` |
-| `src/summary.ts` | Picks: per-frame print requests (copies, 3×5 / 4×6), requests for the lab, Send. Sends **frame numbers only, no images** (`store.picks()`); until the backend exists Send goes to the share sheet / clipboard as text |
+| `src/store.ts` | Marks/notes/active frame, saved to localStorage, synced to the server (debounced PUT). Read-only mode for the lab |
+| `src/summary.ts` | Picks: per-frame print requests (copies, 3×5 / 4×6), requests for the lab, Send. Sends **frame numbers only, no images** (`store.picks()`) to `POST /api/roll/:code/submit`; without a backend, to the share sheet / clipboard as text |
+| `src/labpanel.ts` | `/lab/:code`: the viewer read-only, plus every send the customer made |
+| `worker/handler.ts` | The backend: roll + session API, submit + lab webhook, images from R2 on the same origin |
 | `src/sheetimage.ts` | Marked contact sheet as a JPEG (canvas port of the printed sheet + marks + notes). Always reachable from the bottom bar. In production R2 must send CORS headers or the canvas taints |
 
 ## Keys
@@ -50,5 +61,5 @@ Per frame: `thumb/` 480px AVIF+WebP, `screen/` 2048px AVIF+WebP, `full/` origina
 ## Status
 
 Phase 1 (viewer) and Phase 2 (marking, prints, local persistence, contact-sheet image) done.
-Phase 3 (backend, submit, `/lab/:code`) and Phase 4 (narrate) not started. See `HANDOVER.md` §6.
-`public/_redirects` handles `/r/*` on Cloudflare Pages.
+Phase 3 (backend sync, submit, `/lab/:code`, lab webhook) built and tested locally; not deployed, open questions in `HANDOVER.md` §6.
+Phase 4 (narrate) not started.
