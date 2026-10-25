@@ -1,0 +1,23 @@
+{
+  "name": "eastman-loupe",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "sample": "node scripts/make-sample-scans.mjs samples/K7QM2XW9PA && node scripts/ingest-roll.mjs samples/K7QM2XW9PA --code K7QM2XW9PA --stock \"Portra 400\" --date 2026-10-17 --roll 0412",
+    "ingest": "node scripts/ingest-roll.mjs",
+    "demo": "tsc --noEmit && vite build --mode demo"
+  },
+  "devDependencies": {
+    "sharp": "^0.33.5",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vite-plugin-singlefile": "^2.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
